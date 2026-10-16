@@ -11,7 +11,7 @@ Tokens (classic) → Generate new token (classic)
 
 The go back to your nano file and see the option for GitHub token paste your token there.  (code for nano os.environ.get("GITHUB_TOKEN", "").)   and exit from file by ctrl + o and ctrl + x
 
-BOOM 💥 💥 you can use it now 
+BOOM 💥 💥 you can use it now .if the below code seems messy you can go to pull requests i where you can copy this 
 
 👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻👇🏻
 
