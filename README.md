@@ -1,4 +1,6 @@
 2. Documentation
+
+first create a nano file on your terminal then directly put my code there exit from file and your
 Requirements
 Python 3.8+
 requests library
