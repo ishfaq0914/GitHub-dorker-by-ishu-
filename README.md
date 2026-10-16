@@ -6,4 +6,7 @@ A GitHub Personal Access Token (mandatory — the Code Search API does not work 
 Create a token (step by step)
 GitHub → Settings → Developer settings → Personal access tokens
 Tokens (classic) → Generate new token (classic)
-3
+
+The go back to your nano file and see the option for GitHub token paste your token there and exit from file by ctrl + o and ctrl + x
+
+BOOM 💥 💥 you can use it now 
