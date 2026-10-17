@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+GitHub Dorker v1.0
+==================
+A tool that uses the GitHub Code Search API to find leaked
+passwords, API keys and secrets in public repositories.
+
+Author : You
+License: MIT
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+
+try:
+    import requests
+except ImportError:
+    print("[!] 'requests' library is missing. Run: pip install requests")
+    sys.exit(1)
+
+# ---------------------------------------------------------------- CONFIG ----
+API_URL = "https://api.github.com/search/code"
+RATE_URL = "https://api.github.com/rate_limit"
+
+# Read the token from an environment variable, or hardcode it below.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+
+# ------------------------------------------------------------ ANSI COLORS ---
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+MAGENTA = "\033[95m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+# ------------------------------------------- REAL SECRET DETECTION PATTERNS --
+SECRET_PATTERNS = [
+    r"password\s*[:=]\s*['\"].+['\"]",
+    r"passwd\s*[:=]\s*['\"].+['\"]",
+    r"api[_-]?key\s*[:=]\s*['\"].+['\"]",
+    r"secret[_-]?key\s*[:=]\s*['\"].+['\"]",
+    r"access[_-]?token\s*[:=]\s*['\"].+['\"]",
+    r"private[_-]?key\s*[:=]\s*['\"].+['\"]",
+    r"sk_live_[0-9a-zA-Z]{24}",          # Stripe live secret
+    r"pk_live_[0-9a-zA-Z]{24}",          # Stripe live publishable
+    r"ghp_[0-9a-zA-Z]{36}",              # GitHub personal token
+    r"gho_[0-9a-zA-Z]{36}",              # GitHub OAuth token
+    r"github_pat_[0-9a-zA-Z_]{82}",      # GitHub fine-grained token
+    r"AKIA[0-9A-Z]{16}",                 # AWS access key ID
+    r"AIza[0-9A-Za-z\-_]{35}",           # Google API key
+    r"xox[baprs]-[0-9a-zA-Z\-]{10,}",    # Slack token
+    r"SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}",  # SendGrid
+    r"sk-[0-9A-Za-z]{20,}",              # OpenAI-style key
+    r"bearer\s+[0-9a-zA-Z\-_.]{20,}",    # Bearer token
+    r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    r"(mysql|postgres|postgresql|mongodb(\+srv)?|redis)://[^\s'\"]+",
+    r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",  # JWT
+]
+
+# --------------------------------------------------------------- BANNER -----
+BANNER = f"""{GREEN}{BOLD}
+  ____ _ _   _   _         ____             _
+ / ___(_) |_| |_| |__  _  |  _ \\  ___  _ __| | _____ _ __
+| |  _| | __| __| '_ \\| |_| | | |/ _ \\| '__| |/ / _ \\ '__|
+| |_| | | |_| |_| |_) |  | |_| | (_) | |  |   <  __/ |
+ \\____|_|\\__|\\__|_.__/    |____/ \\___/|_|  |_|\\_\\___|_|
+{RESET}{DIM}        GitHub leaked secrets hunter  |  v1.0{RESET}
+"""
+
+# --------------------------------------------------------------- HELPERS ----
+def check_rate_limit():
+    """Print the remaining API quota for the current token."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    try:
+        r = requests.get(RATE_URL, headers=headers, timeout=10)
+        if r.status_code == 200:
+            core = r.json().get("resources", {}).get("code_search", {})
+            remaining = core.get("remaining", "?")
+            limit = core.get("limit", "?")
+            reset = core.get("reset", 0)
+            reset_str = datetime.fromtimestamp(reset).strftime("%H:%M:%S") if reset else "?"
+            color = GREEN if isinstance(remaining, int) and remaining > 5 else RED
+            print(f"{DIM}[i] Code search quota: {color}{remaining}/{limit}{RESET}"
+                  f"{DIM} (reset at {reset_str} local){RESET}")
+    except Exception:
+        pass
+
+
+def to_raw_url(html_url):
+    """github.com/.../blob/... -> raw.githubusercontent.com/.../..."""
+    return html_url.replace(
+        "https://github.com/", "https://raw.githubusercontent.com/"
+    ).replace("/blob/", "/")
+
+
+def verify_actual_leak(raw_url):
+    """Fetch the file content and check whether it actually contains a real
+    password or API key using regex patterns.
+
+    Returns: (bool, matched_pattern_or_None)
+    """
+    try:
+        res = requests.get(raw_url, timeout=10)
+        if res.status_code == 200:
+            content = res.text
+            for pattern in SECRET_PATTERNS:
+                m = re.search(pattern, content, re.IGNORECASE)
+                if m:
+                    return True, pattern
+    except Exception:
+        pass
+    return False, None
+
+
+def search_github(query, per_page=3, verify=True):
+    """Run one dork query against GitHub and return the results."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
+    params = {"q": query, "per_page": per_page}
+
+    try:
+        response = requests.get(API_URL, headers=headers, params=params, timeout=20)
+
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get("items", [])
+            print(
+                f"\n{CYAN}[+] Dork: '{query}' -> Found {len(items)} matches."
+                f" Verifying content...{RESET}"
+            )
+
+            if not items:
+                print(f"{YELLOW}    [-] No matches found.{RESET}")
+                return []
+
+            leaks = []
+            for item in items:
+                repo = item["repository"]["full_name"]
+                path = item["path"]
+                html_url = item["html_url"]
+                raw_url = to_raw_url(html_url)
+
+                if verify:
+                    is_leak, pattern = verify_actual_leak(raw_url)
+                else:
+                    is_leak, pattern = True, None
+
+                if is_leak:
+                    tag = f"{RED}{BOLD}[!! REAL LEAK !!]{RESET}"
+                    leaks.append({
+                        "dork": query,
+                        "repo": repo,
+                        "path": path,
+                        "html_url": html_url,
+                        "raw_url": raw_url,
+                        "pattern": pattern,
+                    })
+                else:
+                    tag = f"{YELLOW}[dork hit]{RESET}"
+
+                print(f"    {tag} {GREEN}{repo}{RESET} -> {path}")
+                print(f"       {DIM}{html_url}{RESET}")
+
+            return leaks
+
+        elif response.status_code == 403:
+            print(f"{RED}[!] Rate limit exhausted or secondary limit reached. "
+                  f"Add a token or wait a while.{RESET}")
+        elif response.status_code == 401:
+            print(f"{RED}[!] 401 Unauthorized -> the token is wrong or expired.{RESET}")
+        elif response.status_code == 422:
+            print(f"{RED}[!] 422 -> invalid query syntax: {query}{RESET}")
+        else:
+            print(f"{RED}[!] HTTP {response.status_code}: {response.text[:200]}{RESET}")
+
+    except requests.exceptions.Timeout:
+        print(f"{RED}[!] Request timeout: {query}{RESET}")
+    except requests.exceptions.ConnectionError:
+        print(f"{RED}[!] Internet / DNS issue.{RESET}")
+
+    return []
+
+
+# ------------------------------------------------------------ DORK LIST -----
+DEFAULT_DORKS = [
+    'filename:.env "password"',
+    'filename:.env "API_KEY"',
+    'filename:config.json "api_key"',
+    'filename:id_rsa "PRIVATE KEY"',
+    '"AKIA" filename:credentials',
+    'filename:.npmrc "_authToken"',
+    'filename:.git-credentials',
+    '"sk_live_" filename:.js',
+    'filename:settings.py "SECRET_KEY"',
+    'filename:docker-compose.yml "PASSWORD"',
+    'filename:wp-config.php "DB_PASSWORD"',
+    '"BEGIN RSA PRIVATE KEY" extension:pem',
+    'filename:.htpasswd',
+    'filename:application.properties "spring.datasource.password"',
+]
+
+# --------------------------------------------------------------- MAIN -------
+def main():
+    parser = argparse.ArgumentParser(
+        description="GitHub Dorker - find leaked secrets in public repositories."
+    )
+    parser.add_argument("-q", "--query", help="A custom dork query")
+    parser.add_argument("-l", "--list", action="store_true",
+                        help="Run the built-in dork list")
+    parser.add_argument("-n", "--per-page", type=int, default=3,
+                        help="Results per dork (max 100, default 3)")
+    parser.add_argument("--no-verify", action="store_true",
+                        help="Skip content verification (fast mode)")
+    parser.add_argument("-o", "--output", help="Save results to a JSON file")
+    parser.add_argument("--delay", type=float, default=2.0,
+                        help="Delay in seconds between dorks (default 2)")
+    args = parser.parse_args()
+
+    print(BANNER)
+
+    if not GITHUB_TOKEN:
+        print(f"{YELLOW}[!] GITHUB_TOKEN is not set. "
+              f"A token is REQUIRED for the Code Search API.{RESET}\n")
+
+    check_rate_limit()
+
+    if args.query:
+        dorks = [args.query]
+    elif args.list:
+        dorks = DEFAULT_DORKS
+    else:
+        parser.print_help()
+        print(f"\n{DIM}Example: python github_dorker.py -l{RESET}")
+        return
+
+    all_leaks = []
+    for dork in dorks:
+        all_leaks.extend(
+            search_github(dork, per_page=args.per_page, verify=not args.no_verify)
+        )
+        time.sleep(args.delay)
+
+    # ------------------------------------------------------- SUMMARY --------
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}[*] Total REAL leaks found: {RED}{len(all_leaks)}{RESET}")
+
+    if all_leaks:
+        print(f"{BOLD}[*] Leak summary:{RESET}")
+        seen = set()
+        for leak in all_leaks:
+            if leak["html_url"] in seen:
+                continue
+            seen.add(leak["html_url"])
+            print(f"  {RED}•{RESET} {leak['repo']} :: {leak['path']}")
+
+    if args.output and all_leaks:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(all_leaks, f, indent=2)
+        print(f"\n{GREEN}[+] Results saved -> {args.output}{RESET}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}[!] Stopped with Ctrl+C.{RESET}")
